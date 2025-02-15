@@ -33,7 +33,7 @@ fn raise_exception(msg: String) -> Result<String, minijinja::Error> {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BeginEndUnkTok(
+pub struct BeginEndUnkPadTok(
     #[serde(with = "either::serde_untagged")] pub Either<String, AddedTokensDecoder>,
 );
 
@@ -50,7 +50,7 @@ pub struct ChatTemplate {
     add_eos_token: Option<bool>,
     added_tokens_decoder: Option<HashMap<String, AddedTokensDecoder>>,
     additional_special_tokens: Option<Vec<String>>,
-    pub bos_token: Option<BeginEndUnkTok>,
+    pub bos_token: Option<BeginEndUnkPadTok>,
 
     /// Jinja format [chat templating] for chat completion.
     ///
@@ -58,15 +58,15 @@ pub struct ChatTemplate {
     pub chat_template: Option<ChatTemplateValue>,
     clean_up_tokenization_spaces: Option<bool>,
     device_map: Option<String>,
-    pub eos_token: Option<BeginEndUnkTok>,
+    pub eos_token: Option<BeginEndUnkPadTok>,
     legacy: Option<bool>,
     model_max_length: Option<f64>,
-    pad_token: Option<String>,
+    pub pad_token: Option<BeginEndUnkPadTok>,
     sp_model_kwargs: Option<HashMap<String, String>>,
     spaces_between_special_tokens: Option<bool>,
     tokenizer_class: Option<String>,
     truncation_size: Option<String>,
-    pub unk_token: Option<BeginEndUnkTok>,
+    pub unk_token: Option<BeginEndUnkPadTok>,
     use_default_system_prompt: Option<bool>,
 }
 
@@ -214,6 +214,12 @@ fn tojson(value: Value, kwargs: Kwargs) -> Result<Value, Error> {
     })
 }
 
+fn strftime_now(fmt: String) -> Result<String, minijinja::Error> {
+    let date = chrono::Utc::now();
+    let date_string = date.format(&fmt).to_string();
+    Ok(date_string)
+}
+
 pub fn apply_chat_template_to(
     messages: Vec<IndexMap<String, MessageContent>>,
     add_generation_prompt: bool,
@@ -266,6 +272,7 @@ pub fn apply_chat_template_to(
     env.add_template("chat_template", &template)?;
     env.add_function("raise_exception", raise_exception);
     env.add_filter("tojson", tojson);
+    env.add_function("strftime_now", strftime_now);
     let tmpl = env.get_template("chat_template").unwrap();
 
     let date = chrono::Utc::now();

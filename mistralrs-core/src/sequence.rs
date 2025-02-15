@@ -186,13 +186,14 @@ pub struct Sequence {
 
     // Cache
     normal_cache: Vec<Option<KvCache>>,
+    normal_draft_cache: Vec<Option<KvCache>>,
     scaling_cache: Option<Tensor>,
     cache: LayerCaches,
     draft_cache: LayerCaches,
     xlora_cache: Option<LayerCaches>,
 
-    // Preallocated KV cache
-    seq_preallocated_cache: Option<Tensor>,
+    // Preallocated KV cache (k,v)
+    seq_preallocated_cache: Option<(Tensor, Tensor)>,
 
     // Mutables
     tokens: Vec<u32>,
@@ -281,8 +282,8 @@ impl Sequence {
         image_gen_response_format: Option<ImageGenerationResponseFormat>,
         sequence_stepping_type: SeqStepType,
         diffusion_params: Option<DiffusionGenerationParams>,
-        // Preallocated KV cache
-        seq_preallocated_cache: Option<Tensor>,
+        // Preallocated KV cache (k,v)
+        seq_preallocated_cache: Option<(Tensor, Tensor)>,
         //
         return_raw_logits: bool,
     ) -> Self {
@@ -306,6 +307,7 @@ impl Sequence {
             timestamp,
             state: RwLock::new(SequenceState::Waiting),
             normal_cache: vec![None; layers],
+            normal_draft_cache: vec![None; layers],
             cache: vec![None; layers],
             draft_cache: vec![None; layers],
             xlora_cache: if is_xlora {
@@ -499,12 +501,16 @@ impl Sequence {
         &self.completion_bytes
     }
 
-    pub fn preallocated_cache(&self) -> Option<&Tensor> {
+    pub fn preallocated_cache(&self) -> Option<&(Tensor, Tensor)> {
         self.seq_preallocated_cache.as_ref()
     }
 
     pub fn normal_cache(&mut self) -> &mut Vec<Option<KvCache>> {
         &mut self.normal_cache
+    }
+
+    pub fn normal_draft_cache(&mut self) -> &mut Vec<Option<KvCache>> {
+        &mut self.normal_draft_cache
     }
 
     pub fn cache(&mut self) -> &mut Vec<Option<(Tensor, Tensor)>> {
@@ -667,13 +673,21 @@ impl Sequence {
     pub fn get_delta(
         &mut self,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let new_decoded = self.peek_delta();
+        if matches!(new_decoded, Ok(Some(_))) {
+            self.stream_idx = self.completion_bytes.len();
+        }
+        new_decoded
+    }
+
+    /// Peeks at the delta between the last two decoded sequences, but does not advance the stream index.
+    pub fn peek_delta(&self) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         let is_first = self.stream_idx == 0;
         let new_decoded = String::from_utf8_lossy(&self.completion_bytes[self.stream_idx..]);
         // Check if the sequence ends with valid utf8, if not skip it as it probably is a multi token sequence
         if new_decoded.ends_with('�') {
             return Ok(None);
         }
-        self.stream_idx = self.completion_bytes.len();
 
         // The first token usually starts with a space. We don't want to add that to the delta.
         // Since we're using the completion_bytes, we need to take care of that ourselves.
@@ -705,8 +719,8 @@ impl Sequence {
 
         get_mut_group!(self).total_time += now - self.timestamp;
 
-        get_mut_group!(self).total_prompt_toks += self.prompt_len;
-        get_mut_group!(self).total_toks += self.len();
+        get_mut_group!(self).total_prompt_toks = self.prompt_len;
+        get_mut_group!(self).total_toks = self.len();
     }
 
     pub fn add_image_choice_to_group(&self, choice: ImageChoice) {
@@ -749,6 +763,7 @@ impl Sequence {
 
     pub fn add_streaming_chunk_choice_to_group(&self, chunk: ChunkChoice) {
         get_mut_group!(self).chat_streaming_chunks.push(chunk);
+        self.update_time_info();
     }
 
     pub fn add_streaming_completion_chunk_choice_to_group(&self, chunk: CompletionChunkChoice) {
@@ -920,6 +935,7 @@ impl SequenceGroup {
         &mut self,
         seq: &Sequence,
         model: String,
+        usage_opt: Option<Usage>,
     ) -> Result<(), Box<SendError<Response>>> {
         if self.chat_streaming_chunks.len() == self.n_choices && self.is_streaming {
             let mut swap_streaming_chunks = vec![];
@@ -934,6 +950,7 @@ impl SequenceGroup {
                     model: model.clone(),
                     system_fingerprint: SYSTEM_FINGERPRINT.to_string(),
                     object: "chat.completion.chunk".to_string(),
+                    usage: usage_opt,
                 }))
                 .await?;
         } else if self.completion_streaming_chunks.len() == self.n_choices && self.is_streaming {
